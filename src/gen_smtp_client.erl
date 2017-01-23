@@ -94,7 +94,7 @@ send(Emails, Options, Callback) ->
 			{error, Reason}
 	end.
 
--spec send_blocking(Email :: email() | [email(), ...], Options :: list()) -> binary() | {'error', atom(), any()} | {'error', any()}.
+-spec send_blocking(Email :: email() | [email(), ...], Options :: list()) -> binary() | [binary()] | {'error', atom(), any()} | {'error', any()}.
 %% @doc Send an email and block waiting for the reply. Returns either a binary that contains
 %% the SMTP server's receipt or `{error, Type, Message}' or `{error, Reason}'.
 send_blocking(Email, Options) when is_tuple(Email) ->
@@ -133,7 +133,7 @@ send_it(Emails, Options) ->
 		_ ->
 			smtp_util:mxlookup(RelayDomain)
 	end,
-	%io:format("MX records for ~s are ~p~n", [RelayDomain, MXRecords]),
+	trace(Options, "MX records for ~s are ~p~n", [RelayDomain, MXRecords]),
 	Hosts = case MXRecords of
 		[] ->
 			[{0, RelayDomain}]; % maybe we're supposed to relay to a host directly
@@ -174,54 +174,54 @@ handle_smtp_throw(FailMsg, Hosts, Emails, Options, RetryList) ->
 try_next_host({FailureType, Message}, [{_Distance, Host} | _Tail] = Hosts, Emails, Options, RetryList) ->
 	Retries = proplists:get_value(retries, Options),
 	RetryCount = proplists:get_value(Host, RetryList),
-	case fetch_next_host(Retries, RetryCount, Hosts, RetryList) of
+	case fetch_next_host(Retries, RetryCount, Hosts, RetryList, Options) of
 		{[], _NewRetryList} ->
 			{error, retries_exceeded, {FailureType, Host, Message}};
 		{NewHosts, NewRetryList} ->
 			try_smtp_sessions(NewHosts, Emails, Options, NewRetryList)
 	end.
 
-fetch_next_host(Retries, RetryCount, [{_Distance, Host} | Tail], RetryList) when is_integer(RetryCount), RetryCount >= Retries ->
+fetch_next_host(Retries, RetryCount, [{_Distance, Host} | Tail], RetryList, Options) when is_integer(RetryCount), RetryCount >= Retries ->
 	% out of chances
-	%io:format("retries for ~s exceeded (~p of ~p)~n", [Host, RetryCount, Retries]),
+	trace(Options, "retries for ~s exceeded (~p of ~p)~n", [Host, RetryCount, Retries]),
 	{Tail, lists:keydelete(Host, 1, RetryList)};
-fetch_next_host(_Retries, RetryCount, [{Distance, Host} | Tail], RetryList) when is_integer(RetryCount) ->
-	%io:format("scheduling ~s for retry (~p of ~p)~n", [Host, RetryCount, Retries]),
+fetch_next_host(Retries, RetryCount, [{Distance, Host} | Tail], RetryList, Options) when is_integer(RetryCount) ->
+	trace(Options, "scheduling ~s for retry (~p of ~p)~n", [Host, RetryCount, Retries]),
 	{Tail ++ [{Distance, Host}], lists:keydelete(Host, 1, RetryList) ++ [{Host, RetryCount + 1}]};
-fetch_next_host(0, _RetryCount, [{_Distance, Host} | Tail], RetryList) ->
+fetch_next_host(0, _RetryCount, [{_Distance, Host} | Tail], RetryList, _Options) ->
 	% done retrying completely
 	{Tail, lists:keydelete(Host, 1, RetryList)};
-fetch_next_host(_Retries, _RetryCount, [{Distance, Host} | Tail], RetryList) ->
+fetch_next_host(Retries, _RetryCount, [{Distance, Host} | Tail], RetryList, Options) ->
 	% otherwise...
-	%io:format("scheduling ~s for retry (~p of ~p)~n", [Host, 1, Retries]),
+	trace(Options, "scheduling ~s for retry (~p of ~p)~n", [Host, 1, Retries]),
 	{Tail ++ [{Distance, Host}], lists:keydelete(Host, 1, RetryList) ++ [{Host, 1}]}.
 
 
 -spec do_smtp_session(Host :: string(), Emails :: [email()], Options :: list()) -> [binary()].
 do_smtp_session(Host, Emails, Options) ->
-	{ok, Socket, _Host, _Banner} = connect(Host, Options),
-	%io:format("connected to ~s; banner was ~s~n", [Host, Banner]),
+	{ok, Socket, _Host, Banner} = connect(Host, Options),
+	trace(Options, "connected to ~s; banner was ~s~n", [Host, Banner]),
 	{ok, Extensions} = try_EHLO(Socket, Options),
-	%io:format("Extensions are ~p~n", [Extensions]),
+	trace(Options, "Extensions are ~p~n", [Extensions]),
 	{Socket2, Extensions2} = try_STARTTLS(Socket, Options, Extensions),
-	%io:format("Extensions are ~p~n", [Extensions2]),
-	_Authed = try_AUTH(Socket2, Options, proplists:get_value(<<"AUTH">>, Extensions2)),
-	%io:format("Authentication status is ~p~n", [Authed]),
-	Receipts = [try_sending_it(Email, Socket2, Extensions2) || Email <- Emails],
-	%io:format("Mail sending successful~n"),
+	trace(Options, "Extensions are ~p~n", [Extensions2]),
+	Authed = try_AUTH(Socket2, Options, proplists:get_value(<<"AUTH">>, Extensions2)),
+	trace(Options, "Authentication status is ~p~n", [Authed]),
+	Receipts = [try_sending_it(Email, Socket2, Extensions2, Options) || Email <- Emails],
+	trace(Options, "Mail sending successful~n", []),
 	quit(Socket2),
 	Receipts.
 
--spec try_sending_it(Emails :: [email()], Socket :: socket:socket(), Extensions :: list()) -> binary().
-try_sending_it({From, To, Body}, Socket, Extensions) ->
-	try_MAIL_FROM(From, Socket, Extensions),
-	try_RCPT_TO(To, Socket, Extensions),
-	try_DATA(Body, Socket, Extensions).
+-spec try_sending_it(Emails :: [email()], Socket :: socket:socket(), Extensions :: list(), Options :: list()) -> binary().
+try_sending_it({From, To, Body}, Socket, Extensions, Options) ->
+	try_MAIL_FROM(From, Socket, Extensions, Options),
+	try_RCPT_TO(To, Socket, Extensions, Options),
+	try_DATA(Body, Socket, Extensions, Options).
 
--spec try_MAIL_FROM(From :: string() | binary(), Socket :: socket:socket(), Extensions :: list()) -> true.
-try_MAIL_FROM(From, Socket, Extensions) when is_binary(From) ->
-	try_MAIL_FROM(binary_to_list(From), Socket, Extensions);
-try_MAIL_FROM("<" ++ _ = From, Socket, _Extensions) ->
+-spec try_MAIL_FROM(From :: string() | binary(), Socket :: socket:socket(), Extensions :: list(), Options :: list()) -> true.
+try_MAIL_FROM(From, Socket, Extensions, Options) when is_binary(From) ->
+	try_MAIL_FROM(binary_to_list(From), Socket, Extensions, Options);
+try_MAIL_FROM("<" ++ _ = From, Socket, _Extensions, Options) ->
 	% TODO do we need to bother with SIZE?
 	socket:send(Socket, ["MAIL FROM: ", From, "\r\n"]),
 	case read_possible_multiline_reply(Socket) of
@@ -231,26 +231,26 @@ try_MAIL_FROM("<" ++ _ = From, Socket, _Extensions) ->
 			quit(Socket),
 			throw({temporary_failure, Msg});
 		{ok, Msg} ->
-			%io:format("Mail FROM rejected: ~p~n", [Msg]),
+			trace(Options, "Mail FROM rejected: ~p~n", [Msg]),
 			quit(Socket),
 			throw({permanent_failure, Msg})
 	end;
-try_MAIL_FROM(From, Socket, Extensions) ->
+try_MAIL_FROM(From, Socket, Extension, Options) ->
 	% someone was bad and didn't put in the angle brackets
-	try_MAIL_FROM("<"++From++">", Socket, Extensions).
+	try_MAIL_FROM("<"++From++">", Socket, Extension, Options).
 
--spec try_RCPT_TO(Tos :: [binary() | string()], Socket :: socket:socket(), Extensions :: list()) -> true.
-try_RCPT_TO([], _Socket, _Extensions) ->
+-spec try_RCPT_TO(Tos :: [binary() | string()], Socket :: socket:socket(), Extensions :: list(), Options :: list()) -> true.
+try_RCPT_TO([], _Socket, _Extensions, _Options) ->
 	true;
-try_RCPT_TO([To | Tail], Socket, Extensions) when is_binary(To) ->
-	try_RCPT_TO([binary_to_list(To) | Tail], Socket, Extensions);
-try_RCPT_TO(["<" ++ _ = To | Tail], Socket, Extensions) ->
+try_RCPT_TO([To | Tail], Socket, Extensions, Options) when is_binary(To) ->
+	try_RCPT_TO([binary_to_list(To) | Tail], Socket, Extensions, Options);
+try_RCPT_TO(["<" ++ _ = To | Tail], Socket, Extensions, Options) ->
 	socket:send(Socket, ["RCPT TO: ",To,"\r\n"]),
 	case read_possible_multiline_reply(Socket) of
 		{ok, <<"250", _Rest/binary>>} ->
-			try_RCPT_TO(Tail, Socket, Extensions);
+			try_RCPT_TO(Tail, Socket, Extensions, Options);
 		{ok, <<"251", _Rest/binary>>} ->
-			try_RCPT_TO(Tail, Socket, Extensions);
+			try_RCPT_TO(Tail, Socket, Extensions, Options);
 		{ok, <<"4", _Rest/binary>> = Msg} ->
 			quit(Socket),
 			throw({temporary_failure, Msg});
@@ -258,14 +258,14 @@ try_RCPT_TO(["<" ++ _ = To | Tail], Socket, Extensions) ->
 			quit(Socket),
 			throw({permanent_failure, Msg})
 	end;
-try_RCPT_TO([To | Tail], Socket, Extensions) ->
+try_RCPT_TO([To | Tail], Socket, Extensions, Options) ->
 	% someone was bad and didn't put in the angle brackets
-	try_RCPT_TO(["<"++To++">" | Tail], Socket, Extensions).
+	try_RCPT_TO(["<"++To++">" | Tail], Socket, Extensions, Options).
 
--spec try_DATA(Body :: binary() | function(), Socket :: socket:socket(), Extensions :: list()) -> binary().
-try_DATA(Body, Socket, Extensions) when is_function(Body) ->
-	try_DATA(Body(), Socket, Extensions);
-try_DATA(Body, Socket, _Extensions) ->
+-spec try_DATA(Body :: binary() | function(), Socket :: socket:socket(), Extensions :: list(), Options :: list()) -> binary().
+try_DATA(Body, Socket, Extensions, Options) when is_function(Body) ->
+	try_DATA(Body(), Socket, Extensions, Options);
+try_DATA(Body, Socket, _Extensions, _Options) ->
 	socket:send(Socket, "DATA\r\n"),
 	case read_possible_multiline_reply(Socket) of
 		{ok, <<"354", _Rest/binary>>} ->
@@ -323,9 +323,9 @@ try_AUTH(Socket, Options, AuthTypes) ->
 
 			Username = to_string(proplists:get_value(username, Options)),
 			Password = to_string(proplists:get_value(password, Options)),
-			%io:format("Auth types: ~p~n", [AuthTypes]),
+			trace(Options, "Auth types: ~p~n", [AuthTypes]),
 			Types = re:split(AuthTypes, " ", [{return, list}, trim]),
-			case do_AUTH(Socket, Username, Password, Types) of
+			case do_AUTH(Socket, Username, Password, Types, Options) of
 				false ->
 					case proplists:get_value(auth, Options) of
 						always ->
@@ -342,19 +342,18 @@ try_AUTH(Socket, Options, AuthTypes) ->
 to_string(String) when is_list(String)   -> String;
 to_string(Binary) when is_binary(Binary) -> binary_to_list(Binary).
 
--spec do_AUTH(Socket :: socket:socket(), Username :: string(), Password :: string(), Types :: [string()]) -> boolean().
-do_AUTH(Socket, Username, Password, Types) ->
+-spec do_AUTH(Socket :: socket:socket(), Username :: string(), Password :: string(), Types :: [string()], Options :: list()) -> boolean().
+do_AUTH(Socket, Username, Password, Types, Options) ->
 	FixedTypes = [string:to_upper(X) || X <- Types],
-	%io:format("Fixed types: ~p~n", [FixedTypes]),
+	trace(Options, "Fixed types: ~p~n", [FixedTypes]),
 	AllowedTypes = [X  || X <- ?AUTH_PREFERENCE, lists:member(X, FixedTypes)],
-	%io:format("available authentication types, in order of preference: ~p~n",
-	%	[AllowedTypes]),
-	do_AUTH_each(Socket, Username, Password, AllowedTypes).
+	trace(Options, "available authentication types, in order of preference: ~p~n", [AllowedTypes]),
+	do_AUTH_each(Socket, Username, Password, AllowedTypes, Options).
 
--spec do_AUTH_each(Socket :: socket:socket(), Username :: string() | binary(), Password :: string() | binary(), AuthTypes :: [string()]) -> boolean().
-do_AUTH_each(_Socket, _Username, _Password, []) ->
+-spec do_AUTH_each(Socket :: socket:socket(), Username :: string() | binary(), Password :: string() | binary(), AuthTypes :: [string()], Options :: list()) -> boolean().
+do_AUTH_each(_Socket, _Username, _Password, [], _Options) ->
 	false;
-do_AUTH_each(Socket, Username, Password, ["CRAM-MD5" | Tail]) ->
+do_AUTH_each(Socket, Username, Password, ["CRAM-MD5" | Tail], Options) ->
 	socket:send(Socket, "AUTH CRAM-MD5\r\n"),
 	case read_possible_multiline_reply(Socket) of
 		{ok, <<"334 ", Rest/binary>>} ->
@@ -365,62 +364,61 @@ do_AUTH_each(Socket, Username, Password, ["CRAM-MD5" | Tail]) ->
 			socket:send(Socket, [String, "\r\n"]),
 			case read_possible_multiline_reply(Socket) of
 				{ok, <<"235", _Rest/binary>>} ->
-					%io:format("authentication accepted~n"),
+					trace(Options, "authentication accepted~n", []),
 					true;
-				{ok, _Msg} ->
-					%io:format("authentication rejected: ~s~n", [Msg]),
-					do_AUTH_each(Socket, Username, Password, Tail)
+				{ok, Msg} ->
+					trace(Options, "authentication rejected: ~s~n", [Msg]),
+					do_AUTH_each(Socket, Username, Password, Tail, Options)
 			end;
-		{ok, _Something} ->
-			%io:format("got ~s~n", [Something]),
-			do_AUTH_each(Socket, Username, Password, Tail)
+		{ok, Something} ->
+			trace(Options, "got ~s~n", [Something]),
+			do_AUTH_each(Socket, Username, Password, Tail, Options)
 	end;
-do_AUTH_each(Socket, Username, Password, ["LOGIN" | Tail]) ->
+do_AUTH_each(Socket, Username, Password, ["LOGIN" | Tail], Options) ->
 	socket:send(Socket, "AUTH LOGIN\r\n"),
 	case read_possible_multiline_reply(Socket) of
 		%% base64 Username: or username:
 		{ok, Prompt} when Prompt == <<"334 VXNlcm5hbWU6\r\n">>; Prompt == <<"334 dXNlcm5hbWU6\r\n">> ->
-			%io:format("username prompt~n"),
+			trace(Options, "username prompt~n", []),
 			U = base64:encode(Username),
 			socket:send(Socket, [U,"\r\n"]),
 			case read_possible_multiline_reply(Socket) of
 				%% base64 Password: or password:
 				{ok, Prompt2} when Prompt2 == <<"334 UGFzc3dvcmQ6\r\n">>; Prompt2 == <<"334 cGFzc3dvcmQ6\r\n">> ->
-					%io:format("password prompt~n"),
+					trace(Options, "password prompt~n", []),
 					P = base64:encode(Password),
 					socket:send(Socket, [P,"\r\n"]),
 					case read_possible_multiline_reply(Socket) of
 						{ok, <<"235 ", _Rest/binary>>} ->
-							%io:format("authentication accepted~n"),
+							trace(Options, "authentication accepted~n", []),
 							true;
-						{ok, _Msg} ->
-							%io:format("password rejected: ~s", [Msg]),
-							do_AUTH_each(Socket, Username, Password, Tail)
+						{ok, Msg} ->
+							trace(Options, "password rejected: ~s", [Msg]),
+							do_AUTH_each(Socket, Username, Password, Tail, Options)
 					end;
-				{ok, _Msg2} ->
-					%io:format("username rejected: ~s", [Msg2]),
-					do_AUTH_each(Socket, Username, Password, Tail)
+				{ok, Msg2} ->
+					trace(Options, "username rejected: ~s", [Msg2]),
+					do_AUTH_each(Socket, Username, Password, Tail, Options)
 			end;
-		{ok, _Something} ->
-			%io:format("got ~s~n", [Something]),
-			do_AUTH_each(Socket, Username, Password, Tail)
+		{ok, Something} ->
+			trace(Options, "got ~s~n", [Something]),
+			do_AUTH_each(Socket, Username, Password, Tail, Options)
 	end;
-do_AUTH_each(Socket, Username, Password, ["PLAIN" | Tail]) ->
+do_AUTH_each(Socket, Username, Password, ["PLAIN" | Tail], Options) ->
 	AuthString = base64:encode("\0"++Username++"\0"++Password),
 	socket:send(Socket, ["AUTH PLAIN ", AuthString, "\r\n"]),
 	case read_possible_multiline_reply(Socket) of
 		{ok, <<"235", _Rest/binary>>} ->
-			%io:format("authentication accepted~n"),
+			trace(Options, "authentication accepted~n", []),
 			true;
-		_Else ->
+		Else ->
 			% TODO do we need to bother trying the multi-step PLAIN?
-			%io:format("authentication rejected~n"),
-			%io:format("~p~n", [Else]),
-			do_AUTH_each(Socket, Username, Password, Tail)
+			trace(Options, "authentication rejected ~p~n", [Else]),
+			do_AUTH_each(Socket, Username, Password, Tail, Options)
 	end;
-do_AUTH_each(Socket, Username, Password, [_Type | Tail]) ->
-	%io:format("unsupported AUTH type ~s~n", [Type]),
-	do_AUTH_each(Socket, Username, Password, Tail).
+do_AUTH_each(Socket, Username, Password, [Type | Tail], Options) ->
+	trace(Options, "unsupported AUTH type ~s~n", [Type]),
+	do_AUTH_each(Socket, Username, Password, Tail, Options).
 
 -spec try_EHLO(Socket :: socket:socket(), Options :: list()) -> {ok, list()}.
 try_EHLO(Socket, Options) ->
@@ -433,7 +431,7 @@ try_EHLO(Socket, Options) ->
 			quit(Socket),
 			throw({temporary_failure, Msg});
 		{ok, Reply} ->
-			{ok, parse_extensions(Reply)}
+			{ok, parse_extensions(Reply, Options)}
 	end.
 
 -spec try_HELO(Socket :: socket:socket(), Options :: list()) -> {ok, list()}.
@@ -456,17 +454,17 @@ try_STARTTLS(Socket, Options, Extensions) ->
 	case {proplists:get_value(tls, Options),
 			proplists:get_value(<<"STARTTLS">>, Extensions)} of
 		{Atom, true} when Atom =:= always; Atom =:= if_available ->
-			%io:format("Starting TLS~n"),
+			trace(Options, "Starting TLS~n", []),
 			case {do_STARTTLS(Socket, Options), Atom} of
 				{false, always} ->
-					%io:format("TLS failed~n"),
+					trace(Options, "TLS failed~n", []),
 					quit(Socket),
 					erlang:throw({temporary_failure, tls_failed});
 				{false, if_available} ->
-					%io:format("TLS failed~n"),
+					trace(Options, "TLS failed~n", []),
 					{Socket, Extensions};
 				{{S, E}, _} ->
-					%io:format("TLS started~n"),
+					trace(Options, "TLS started~n", []),
 					{S, E}
 			end;
 		{always, _} ->
@@ -495,8 +493,8 @@ do_STARTTLS(Socket, Options) ->
 					quit(Socket),
 					error_logger:error_msg("SSL not started.~n"),
 					erlang:throw({permanent_failure, ssl_not_started});
-				_Else ->
-					%io:format("~p~n", [Else]),
+				Else ->
+					trace(Options, "~p~n", [Else]),
 					false
 			end;
 		{ok, <<"4", _Rest/binary>> = Msg} ->
@@ -604,8 +602,8 @@ check_options(Options) ->
 			end
 	end.
 
--spec parse_extensions(Reply :: binary()) -> [{binary(), binary()}].
-parse_extensions(Reply) ->
+-spec parse_extensions(Reply :: binary(), Options :: list()) -> [{binary(), binary()}].
+parse_extensions(Reply, Options) ->
 	[_ | Reply2] = re:split(Reply, "\r\n", [{return, binary}, trim]),
 	[
 		begin
@@ -618,11 +616,17 @@ parse_extensions(Reply) ->
 							0 ->
 								{binstr:to_upper(Body), true};
 							_ ->
-								%io:format("discarding option ~p~n", [Body]),
+								trace(Options, "discarding option ~p~n", [Body]),
 								[]
 						end
 				end
 		end  || Entry <- Reply2].
+
+trace(Options, Format, Args) ->
+	case proplists:get_value(trace_fun, Options) of
+		undefined -> ok;
+		F -> F(Format, Args)
+	end.
 
 -ifdef(TEST).
 

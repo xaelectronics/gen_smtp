@@ -47,7 +47,7 @@ mxlookup(Domain) ->
 	end,
 	case inet_res:lookup(Domain, in, mx) of
 		[] ->
-			[];
+			lists:map(fun(X) -> {10, inet_parse:ntoa(X)} end, inet_res:lookup(Domain, in, a));
 		Result ->
 			lists:sort(fun({Pref, _Name}, {Pref2, _Name2}) -> Pref =< Pref2 end, Result)
 	end.
