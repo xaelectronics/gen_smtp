@@ -51,7 +51,7 @@
 
 -type email() :: {string() | binary(), [string() | binary(), ...], string() | binary() | function()}.
 
--spec send(Email :: {string() | binary(), [string() | binary(), ...], string() | binary() | function()}, Options :: list()) -> {'ok', pid()} | {'error', any()}.
+-spec send(Email :: email(), Options :: list()) -> {'ok', pid()} | {'error', any()}.
 %% @doc Send an email in a non-blocking fashion via a spawned_linked process.
 %% The process will exit abnormally on a send failure.
 send(Email, Options) ->
@@ -60,8 +60,10 @@ send(Email, Options) ->
 %% @doc Send an email nonblocking and invoke a callback with the result of the send.
 %% The callback will receive either `{ok, Receipt}' where Receipt is the SMTP server's receipt
 %% identifier,  `{error, Type, Message}' or `{exit, ExitReason}', as the single argument.
--spec send(Email :: {string() | binary(), [string() | binary(), ...], string() | binary() | function()}, Options :: list(), Callback :: function() | 'undefined') -> {'ok', pid()} | {'error', any()}.
-send(Email, Options, Callback) ->
+-spec send(Email :: email() | [email()], Options :: list(), Callback :: function() | 'undefined') -> {'ok', pid()} | {'error', any()}.
+send(Email, Options, Callback) when is_tuple(Email) ->
+	send([Email], Options, Callback);
+send(Emails, Options, Callback) ->
 	NewOptions = lists:ukeymerge(1, lists:sort(Options),
 		lists:sort(?DEFAULT_OPTIONS)),
 	case check_options(NewOptions) of
@@ -69,7 +71,7 @@ send(Email, Options, Callback) ->
 			spawn(fun() ->
 						process_flag(trap_exit, true),
 						Pid = spawn_link(fun() ->
-									send_it_nonblock(Email, NewOptions, Callback)
+									send_it_nonblock(Emails, NewOptions, Callback)
 							end
 						),
 						receive
@@ -84,7 +86,7 @@ send(Email, Options, Callback) ->
 				end);
 		ok ->
 			Pid = spawn_link(fun () ->
-						send_it_nonblock(Email, NewOptions, Callback)
+						send_it_nonblock(Emails, NewOptions, Callback)
 				end
 			),
 			{ok, Pid};
@@ -92,22 +94,24 @@ send(Email, Options, Callback) ->
 			{error, Reason}
 	end.
 
--spec send_blocking(Email :: {string() | binary(), [string() | binary(), ...], string() | binary() | function()}, Options :: list()) -> binary() | {'error', atom(), any()} | {'error', any()}.
+-spec send_blocking(Email :: email() | [email(), ...], Options :: list()) -> binary() | {'error', atom(), any()} | {'error', any()}.
 %% @doc Send an email and block waiting for the reply. Returns either a binary that contains
 %% the SMTP server's receipt or `{error, Type, Message}' or `{error, Reason}'.
-send_blocking(Email, Options) ->
+send_blocking(Email, Options) when is_tuple(Email) ->
+	send_blocking([Email], Options);
+send_blocking(Emails, Options) ->
 	NewOptions = lists:ukeymerge(1, lists:sort(Options),
 		lists:sort(?DEFAULT_OPTIONS)),
 	case check_options(NewOptions) of
 		ok ->
-			send_it(Email, NewOptions);
+			send_it(Emails, NewOptions);
 		{error, Reason} ->
 			{error, Reason}
 	end.
 
--spec send_it_nonblock(Email :: email(), Options :: list(), Callback :: function() | 'undefined') ->{'ok', binary()} | {'error', any(), any()}.
-send_it_nonblock(Email, Options, Callback) ->
-	case send_it(Email, Options) of
+-spec send_it_nonblock(Emails :: [email(), ...], Options :: list(), Callback :: function() | 'undefined') ->{'ok', binary()} | {'error', any(), any()}.
+send_it_nonblock(Emails, Options, Callback) ->
+	case send_it(Emails, Options) of
 		{error, Type, Message} when is_function(Callback) ->
 			Callback({error, Type, Message}),
 			{error, Type, Message};
@@ -120,8 +124,8 @@ send_it_nonblock(Email, Options, Callback) ->
 			{ok, Receipt}
 	end.
 
--spec send_it(Email :: {string() | binary(), [string() | binary(), ...], string() | binary() | function()}, Options :: list()) -> binary() | {'error', any(), any()}.
-send_it(Email, Options) ->
+-spec send_it(Emails :: [email(), ...], Options :: list()) -> binary() | {'error', any(), any()}.
+send_it(Emails, Options) ->
 	RelayDomain = proplists:get_value(relay, Options),
 	MXRecords = case proplists:get_value(no_mx_lookups, Options) of
 		true ->
@@ -136,45 +140,45 @@ send_it(Email, Options) ->
 		_ ->
 			MXRecords
 	end,
-	try_smtp_sessions(Hosts, Email, Options, []).
+	try_smtp_sessions(Hosts, Emails, Options, []).
 
--spec try_smtp_sessions(Hosts :: [{non_neg_integer(), string()}, ...], Email :: email(), Options :: list(), RetryList :: list()) -> binary() | {'error', any(), any()}.
-try_smtp_sessions([{_Distance, Host} | _Tail] = Hosts, Email, Options, RetryList) ->
-	try do_smtp_session(Host, Email, Options) of
+-spec try_smtp_sessions(Hosts :: [{non_neg_integer(), string()}, ...], Emails :: [email(), ...], Options :: list(), RetryList :: list()) -> binary() | {'error', any(), any()}.
+try_smtp_sessions([{_Distance, Host} | _Tail] = Hosts, Emails, Options, RetryList) ->
+	try do_smtp_session(Host, Emails, Options) of
 		Res -> Res
 	catch
 		throw:FailMsg ->
-			handle_smtp_throw(FailMsg, Hosts, Email, Options, RetryList)
+			handle_smtp_throw(FailMsg, Hosts, Emails, Options, RetryList)
 	end.
 
-handle_smtp_throw({permanent_failure, Message}, [{_Distance, Host} | _Tail], _Email, _Options, _RetryList) ->
+handle_smtp_throw({permanent_failure, Message}, [{_Distance, Host} | _Tail], _Emails, _Options, _RetryList) ->
 	% permanent failure means no retries, and don't even continue with other hosts
 	{error, no_more_hosts, {permanent_failure, Host, Message}};
-handle_smtp_throw({temporary_failure, tls_failed}, [{_Distance, Host} | _Tail] = Hosts, Email, Options, RetryList) ->
+handle_smtp_throw({temporary_failure, tls_failed}, [{_Distance, Host} | _Tail] = Hosts, Emails, Options, RetryList) ->
 	% Could not start the TLS handshake; if tls is optional then try without TLS
 	case proplists:get_value(tls, Options) of
 		if_available ->
 			NoTLSOptions = [{tls,never} | proplists:delete(tls, Options)],
-			try do_smtp_session(Host, Email, NoTLSOptions) of
+			try do_smtp_session(Host, Emails, NoTLSOptions) of
 				Res -> Res
 			catch
 				throw:FailMsg ->
-					handle_smtp_throw(FailMsg, Hosts, Email, Options, RetryList)
+					handle_smtp_throw(FailMsg, Hosts, Emails, Options, RetryList)
 			end;
 		_ ->
-			try_next_host({temporary_failure, tls_failed}, Hosts, Email, Options, RetryList)
+			try_next_host({temporary_failure, tls_failed}, Hosts, Emails, Options, RetryList)
 	end;
-handle_smtp_throw(FailMsg, Hosts, Email, Options, RetryList) ->
-	try_next_host(FailMsg, Hosts, Email, Options, RetryList).
+handle_smtp_throw(FailMsg, Hosts, Emails, Options, RetryList) ->
+	try_next_host(FailMsg, Hosts, Emails, Options, RetryList).
 
-try_next_host({FailureType, Message}, [{_Distance, Host} | _Tail] = Hosts, Email, Options, RetryList) ->
+try_next_host({FailureType, Message}, [{_Distance, Host} | _Tail] = Hosts, Emails, Options, RetryList) ->
 	Retries = proplists:get_value(retries, Options),
 	RetryCount = proplists:get_value(Host, RetryList),
 	case fetch_next_host(Retries, RetryCount, Hosts, RetryList) of
 		{[], _NewRetryList} ->
 			{error, retries_exceeded, {FailureType, Host, Message}};
 		{NewHosts, NewRetryList} ->
-			try_smtp_sessions(NewHosts, Email, Options, NewRetryList)
+			try_smtp_sessions(NewHosts, Emails, Options, NewRetryList)
 	end.
 
 fetch_next_host(Retries, RetryCount, [{_Distance, Host} | Tail], RetryList) when is_integer(RetryCount), RetryCount >= Retries ->
@@ -193,8 +197,8 @@ fetch_next_host(_Retries, _RetryCount, [{Distance, Host} | Tail], RetryList) ->
 	{Tail ++ [{Distance, Host}], lists:keydelete(Host, 1, RetryList) ++ [{Host, 1}]}.
 
 
--spec do_smtp_session(Host :: string(), Email :: email(), Options :: list()) -> binary().
-do_smtp_session(Host, Email, Options) ->
+-spec do_smtp_session(Host :: string(), Emails :: [email()], Options :: list()) -> [binary()].
+do_smtp_session(Host, Emails, Options) ->
 	{ok, Socket, _Host, _Banner} = connect(Host, Options),
 	%io:format("connected to ~s; banner was ~s~n", [Host, Banner]),
 	{ok, Extensions} = try_EHLO(Socket, Options),
@@ -203,12 +207,12 @@ do_smtp_session(Host, Email, Options) ->
 	%io:format("Extensions are ~p~n", [Extensions2]),
 	_Authed = try_AUTH(Socket2, Options, proplists:get_value(<<"AUTH">>, Extensions2)),
 	%io:format("Authentication status is ~p~n", [Authed]),
-	Receipt = try_sending_it(Email, Socket2, Extensions2),
+	Receipts = [try_sending_it(Email, Socket2, Extensions2) || Email <- Emails],
 	%io:format("Mail sending successful~n"),
 	quit(Socket2),
-	Receipt.
+	Receipts.
 
--spec try_sending_it(Email :: email(), Socket :: socket:socket(), Extensions :: list()) -> binary().
+-spec try_sending_it(Emails :: [email()], Socket :: socket:socket(), Extensions :: list()) -> binary().
 try_sending_it({From, To, Body}, Socket, Extensions) ->
 	try_MAIL_FROM(From, Socket, Extensions),
 	try_RCPT_TO(To, Socket, Extensions),
