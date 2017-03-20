@@ -230,7 +230,7 @@ decode_header_tokens_permissive([Data | Tokens], Charset, Stack) ->
 
 
 convert(To, From, Data) ->
-	iconv:conv(To, From, Data).
+	iconv:convert(To, From, Data).
 
 
 decode_component(Headers, Body, MimeVsn, Options) when MimeVsn =:= <<"1.0">> ->
@@ -468,7 +468,7 @@ decode_body(Type, Body, undefined, _OutEncoding) ->
 decode_body(Type, Body, InEncoding, OutEncoding) ->
 	NewBody = decode_body(Type, Body),
 	InEncodingFixed = fix_encoding(InEncoding),
-	{ok, Result} = iconv:conv(OutEncoding, InEncodingFixed, NewBody),
+	{ok, Result} = iconv:convert(OutEncoding, InEncodingFixed, NewBody),
 	Result.
 
 -spec decode_body(Type :: binary() | 'undefined', Body :: binary()) -> binary().
