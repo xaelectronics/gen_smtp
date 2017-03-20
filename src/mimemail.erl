@@ -214,7 +214,7 @@ decode_header_tokens_permissive([], _, Stack) ->
 decode_header_tokens_permissive([{Enc, Data} | Tokens], Charset, [{Enc, PrevData} | Stack]) ->
 	NewData = iolist_to_binary([PrevData, Data]),
 	case convert(Charset, Enc, NewData) of
-		S ->
+		{ok, S} ->
 			decode_header_tokens_permissive(Tokens, Charset, [S | Stack]);
 		_ ->
 			decode_header_tokens_permissive(Tokens, Charset, [{Enc, NewData} | Stack])
@@ -230,7 +230,8 @@ decode_header_tokens_permissive([Data | Tokens], Charset, Stack) ->
 
 
 convert(To, From, Data) ->
-	iconv:convert(To, From, Data).
+    S = iconv:convert(To, From, Data),
+    {ok, S}.
 
 
 decode_component(Headers, Body, MimeVsn, Options) when MimeVsn =:= <<"1.0">> ->
