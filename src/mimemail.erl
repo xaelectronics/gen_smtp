@@ -214,7 +214,7 @@ decode_header_tokens_permissive([], _, Stack) ->
 decode_header_tokens_permissive([{Enc, Data} | Tokens], Charset, [{Enc, PrevData} | Stack]) ->
 	NewData = iolist_to_binary([PrevData, Data]),
 	case convert(Charset, Enc, NewData) of
-		{ok, S} ->
+		S ->
 			decode_header_tokens_permissive(Tokens, Charset, [S | Stack]);
 		_ ->
 			decode_header_tokens_permissive(Tokens, Charset, [{Enc, NewData} | Stack])
