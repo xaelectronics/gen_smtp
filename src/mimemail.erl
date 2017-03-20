@@ -468,8 +468,7 @@ decode_body(Type, Body, undefined, _OutEncoding) ->
 decode_body(Type, Body, InEncoding, OutEncoding) ->
 	NewBody = decode_body(Type, Body),
 	InEncodingFixed = fix_encoding(InEncoding),
-	{ok, Result} = iconv:convert(OutEncoding, InEncodingFixed, NewBody),
-	Result.
+	iconv:convert(OutEncoding, InEncodingFixed, NewBody).
 
 -spec decode_body(Type :: binary() | 'undefined', Body :: binary()) -> binary().
 decode_body(undefined, Body) ->
